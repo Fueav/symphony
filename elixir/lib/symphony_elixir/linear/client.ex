@@ -117,10 +117,14 @@ defmodule SymphonyElixir.Linear.Client do
 
       true ->
         with {:ok, assignee_filter} <- routing_assignee_filter() do
-          do_fetch_by_states(project_slug, tracker.active_states, assignee_filter)
+          do_fetch_by_states(project_slug, candidate_state_names(), assignee_filter)
         end
     end
   end
+
+  @doc false
+  @spec candidate_state_names_for_test() :: [String.t()]
+  def candidate_state_names_for_test, do: candidate_state_names()
 
   @spec fetch_issues_by_states([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
   def fetch_issues_by_states(state_names) when is_list(state_names) do
@@ -238,6 +242,10 @@ defmodule SymphonyElixir.Linear.Client do
 
   defp do_fetch_by_states(project_slug, state_names, assignee_filter) do
     do_fetch_by_states_page(project_slug, state_names, assignee_filter, nil, [])
+  end
+
+  defp candidate_state_names do
+    Config.runnable_issue_states()
   end
 
   defp do_fetch_by_states_page(project_slug, state_names, assignee_filter, after_cursor, acc_issues) do

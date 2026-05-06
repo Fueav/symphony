@@ -17,6 +17,10 @@ defmodule SymphonyElixir.CoreTest do
     assert config.tracker.terminal_states == ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]
     assert config.tracker.assignee == nil
     assert config.agent.max_turns == 20
+    assert config.codex_review.enabled == false
+    assert config.codex_review.states == []
+    assert config.codex_review.prompt == nil
+    assert Config.runnable_issue_states() == ["Todo", "In Progress"]
 
     write_workflow_file!(Workflow.workflow_file_path(), poll_interval_ms: "invalid")
 
@@ -86,6 +90,90 @@ defmodule SymphonyElixir.CoreTest do
 
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "123")
     assert {:error, {:unsupported_tracker_kind, "123"}} = Config.validate!()
+  end
+
+  test "codex review states extend runnable states only when enabled" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_active_states: ["In Progress"],
+      codex_review_enabled: false,
+      codex_review_states: ["In Review"]
+    )
+
+    assert Config.runnable_issue_states() == ["In Progress"]
+    refute Config.codex_review_state?("In Review")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_active_states: ["In Progress"],
+      codex_review_enabled: true,
+      codex_review_states: ["In Review", " In Review ", "Codex Review"]
+    )
+
+    assert Config.runnable_issue_states() == ["In Progress", "In Review", "Codex Review"]
+    assert Config.codex_review_state?("in review")
+    assert Config.codex_review_state?(" Codex Review ")
+    refute Config.codex_review_state?("In Progress")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_active_states: ["In Progress"],
+      codex_review_enabled: false,
+      codex_review_states: [" ", "In Review"],
+      codex_review_prompt: "   "
+    )
+
+    assert Config.runnable_issue_states() == ["In Progress"]
+    assert Config.settings!().codex_review.states == ["In Review"]
+    assert Config.settings!().codex_review.prompt == nil
+  end
+
+  test "enabled codex review requires at least one configured state" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      codex_review_enabled: true,
+      codex_review_states: []
+    )
+
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "codex_review.states"
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      codex_review_enabled: true,
+      codex_review_states: nil
+    )
+
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "codex_review.states"
+  end
+
+  test "orchestrator dispatches codex review states when review automation is enabled" do
+    issue = %Issue{
+      id: "issue-review",
+      identifier: "MT-901",
+      title: "Review completed work",
+      state: "In Review",
+      description: "Raw handoff exists",
+      labels: []
+    }
+
+    state = %Orchestrator.State{
+      running: %{},
+      claimed: MapSet.new(),
+      max_concurrent_agents: 1
+    }
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_active_states: ["In Progress"],
+      codex_review_enabled: false,
+      codex_review_states: ["In Review"]
+    )
+
+    refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_active_states: ["In Progress"],
+      codex_review_enabled: true,
+      codex_review_states: ["In Review"]
+    )
+
+    assert Orchestrator.should_dispatch_issue_for_test(issue, state)
   end
 
   test "current WORKFLOW.md file is valid and complete" do
@@ -543,6 +631,7 @@ defmodule SymphonyElixir.CoreTest do
       |> Map.put(:retry_attempts, %{})
     end)
 
+    sent_at_ms = System.monotonic_time(:millisecond)
     send(pid, {:DOWN, ref, :process, self(), :normal})
     Process.sleep(50)
     state = :sys.get_state(pid)
@@ -551,7 +640,7 @@ defmodule SymphonyElixir.CoreTest do
     assert MapSet.member?(state.completed, issue_id)
     assert %{attempt: 1, due_at_ms: due_at_ms} = state.retry_attempts[issue_id]
     assert is_integer(due_at_ms)
-    assert_due_in_range(due_at_ms, 500, 1_100)
+    assert_retry_delay_in_range(due_at_ms, sent_at_ms, 900, 2_000)
   end
 
   test "abnormal worker exit increments retry attempt progressively" do
@@ -584,6 +673,7 @@ defmodule SymphonyElixir.CoreTest do
       |> Map.put(:retry_attempts, %{})
     end)
 
+    sent_at_ms = System.monotonic_time(:millisecond)
     send(pid, {:DOWN, ref, :process, self(), :boom})
     Process.sleep(50)
     state = :sys.get_state(pid)
@@ -591,7 +681,7 @@ defmodule SymphonyElixir.CoreTest do
     assert %{attempt: 3, due_at_ms: due_at_ms, identifier: "MT-559", error: "agent exited: :boom"} =
              state.retry_attempts[issue_id]
 
-    assert_due_in_range(due_at_ms, 39_500, 40_500)
+    assert_retry_delay_in_range(due_at_ms, sent_at_ms, 39_900, 41_000)
   end
 
   test "first abnormal worker exit waits before retrying" do
@@ -623,6 +713,7 @@ defmodule SymphonyElixir.CoreTest do
       |> Map.put(:retry_attempts, %{})
     end)
 
+    sent_at_ms = System.monotonic_time(:millisecond)
     send(pid, {:DOWN, ref, :process, self(), :boom})
     Process.sleep(50)
     state = :sys.get_state(pid)
@@ -630,7 +721,7 @@ defmodule SymphonyElixir.CoreTest do
     assert %{attempt: 1, due_at_ms: due_at_ms, identifier: "MT-560", error: "agent exited: :boom"} =
              state.retry_attempts[issue_id]
 
-    assert_due_in_range(due_at_ms, 9_000, 10_500)
+    assert_retry_delay_in_range(due_at_ms, sent_at_ms, 9_900, 11_000)
   end
 
   test "stale retry timer messages do not consume newer retry entries" do
@@ -750,11 +841,11 @@ defmodule SymphonyElixir.CoreTest do
     assert Orchestrator.select_worker_host_for_test(state, "worker-a") == "worker-a"
   end
 
-  defp assert_due_in_range(due_at_ms, min_remaining_ms, max_remaining_ms) do
-    remaining_ms = due_at_ms - System.monotonic_time(:millisecond)
+  defp assert_retry_delay_in_range(due_at_ms, sent_at_ms, min_delay_ms, max_delay_ms) do
+    delay_ms = due_at_ms - sent_at_ms
 
-    assert remaining_ms >= min_remaining_ms
-    assert remaining_ms <= max_remaining_ms
+    assert delay_ms >= min_delay_ms
+    assert delay_ms <= max_delay_ms
   end
 
   defp restore_app_env(key, nil), do: Application.delete_env(:symphony_elixir, key)
@@ -810,6 +901,60 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt =~ "Ticket MT-697"
     assert prompt =~ "created=2026-02-26T18:06:48Z"
     assert prompt =~ "updated=2026-02-26T18:07:03Z"
+  end
+
+  test "prompt builder uses codex review prompt for configured review states" do
+    workflow_prompt = "Implement {{ issue.identifier }} in {{ issue.state }}"
+    review_prompt = "Review {{ issue.identifier }} in {{ issue.state }} attempt={{ attempt }}"
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      prompt: workflow_prompt,
+      codex_review_enabled: true,
+      codex_review_states: ["In Review"],
+      codex_review_prompt: review_prompt
+    )
+
+    review_issue = %Issue{
+      identifier: "MT-902",
+      title: "Review handoff",
+      description: "Review work",
+      state: "In Review",
+      url: "https://example.org/issues/MT-902",
+      labels: []
+    }
+
+    implementation_issue = %{review_issue | state: "In Progress"}
+
+    assert PromptBuilder.build_prompt(review_issue, attempt: 4) == "Review MT-902 in In Review attempt=4"
+    assert PromptBuilder.uses_state_specific_prompt?(review_issue)
+    assert PromptBuilder.build_prompt(implementation_issue, attempt: 4) == "Implement MT-902 in In Progress"
+    refute PromptBuilder.uses_state_specific_prompt?(implementation_issue)
+  end
+
+  test "prompt builder uses default codex review prompt when none is configured" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      codex_review_enabled: true,
+      codex_review_states: ["In Review"],
+      codex_review_prompt: nil
+    )
+
+    issue = %Issue{
+      identifier: "MT-903",
+      title: "Review with default prompt",
+      description: nil,
+      state: "In Review",
+      url: "https://example.org/issues/MT-903",
+      labels: []
+    }
+
+    prompt = PromptBuilder.build_prompt(issue)
+
+    assert prompt =~ "You are performing a Codex review for a Linear issue."
+    assert prompt =~ "Identifier: MT-903"
+    assert prompt =~ "Title: Review with default prompt"
+    assert prompt =~ "Current status: In Review"
+    assert prompt =~ "No description provided."
+    assert prompt =~ "Stop for human judgment only"
   end
 
   test "prompt builder normalizes nested date-like values, maps, and structs in issue fields" do

@@ -199,6 +199,40 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
+  defmodule CodexReview do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @primary_key false
+    embedded_schema do
+      field(:enabled, :boolean, default: false)
+      field(:states, {:array, :string}, default: [])
+      field(:prompt, :string)
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(attrs, [:enabled, :states, :prompt], empty_values: [])
+      |> validate_states_when_enabled()
+    end
+
+    defp validate_states_when_enabled(changeset) do
+      if get_field(changeset, :enabled) == true and normalized_states(get_field(changeset, :states)) == [] do
+        add_error(changeset, :states, "must include at least one state when codex_review is enabled")
+      else
+        changeset
+      end
+    end
+
+    defp normalized_states(states) when is_list(states) do
+      states
+      |> Enum.map(fn state -> state |> to_string() |> String.trim() end)
+      |> Enum.reject(&(&1 == ""))
+    end
+  end
+
   defmodule Hooks do
     @moduledoc false
     use Ecto.Schema
@@ -268,6 +302,7 @@ defmodule SymphonyElixir.Config.Schema do
     embeds_one(:worker, Worker, on_replace: :update, defaults_to_struct: true)
     embeds_one(:agent, Agent, on_replace: :update, defaults_to_struct: true)
     embeds_one(:codex, Codex, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:codex_review, CodexReview, on_replace: :update, defaults_to_struct: true)
     embeds_one(:hooks, Hooks, on_replace: :update, defaults_to_struct: true)
     embeds_one(:observability, Observability, on_replace: :update, defaults_to_struct: true)
     embeds_one(:server, Server, on_replace: :update, defaults_to_struct: true)
@@ -360,6 +395,7 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:worker, with: &Worker.changeset/2)
     |> cast_embed(:agent, with: &Agent.changeset/2)
     |> cast_embed(:codex, with: &Codex.changeset/2)
+    |> cast_embed(:codex_review, with: &CodexReview.changeset/2)
     |> cast_embed(:hooks, with: &Hooks.changeset/2)
     |> cast_embed(:observability, with: &Observability.changeset/2)
     |> cast_embed(:server, with: &Server.changeset/2)
@@ -383,8 +419,25 @@ defmodule SymphonyElixir.Config.Schema do
         turn_sandbox_policy: normalize_optional_map(settings.codex.turn_sandbox_policy)
     }
 
-    %{settings | tracker: tracker, workspace: workspace, codex: codex}
+    codex_review = %{
+      settings.codex_review
+      | states: normalize_state_names(settings.codex_review.states),
+        prompt: normalize_optional_string(settings.codex_review.prompt)
+    }
+
+    %{settings | tracker: tracker, workspace: workspace, codex: codex, codex_review: codex_review}
   end
+
+  @doc false
+  @spec normalize_state_names(term()) :: [String.t()]
+  def normalize_state_names(states) when is_list(states) do
+    states
+    |> Enum.map(fn state -> state |> to_string() |> String.trim() end)
+    |> Enum.reject(&(&1 == ""))
+    |> uniq_state_names()
+  end
+
+  def normalize_state_names(_states), do: []
 
   defp normalize_keys(value) when is_map(value) do
     Enum.reduce(value, %{}, fn {key, raw_value}, normalized ->
@@ -397,6 +450,29 @@ defmodule SymphonyElixir.Config.Schema do
 
   defp normalize_optional_map(nil), do: nil
   defp normalize_optional_map(value) when is_map(value), do: normalize_keys(value)
+
+  defp normalize_optional_string(value) when is_binary(value) do
+    trimmed = String.trim(value)
+
+    if trimmed == "", do: nil, else: trimmed
+  end
+
+  defp normalize_optional_string(_value), do: nil
+
+  defp uniq_state_names(states) when is_list(states) do
+    states
+    |> Enum.reduce({[], MapSet.new()}, fn state_name, {names, seen} ->
+      normalized = normalize_issue_state(String.trim(state_name))
+
+      if MapSet.member?(seen, normalized) do
+        {names, seen}
+      else
+        {[String.trim(state_name) | names], MapSet.put(seen, normalized)}
+      end
+    end)
+    |> elem(0)
+    |> Enum.reverse()
+  end
 
   defp normalize_key(value) when is_atom(value), do: Atom.to_string(value)
   defp normalize_key(value), do: to_string(value)

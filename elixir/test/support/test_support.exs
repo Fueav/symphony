@@ -107,6 +107,9 @@ defmodule SymphonyElixir.TestSupport do
           max_turns: 20,
           max_retry_backoff_ms: 300_000,
           max_concurrent_agents_by_state: %{},
+          codex_review_enabled: false,
+          codex_review_states: [],
+          codex_review_prompt: nil,
           codex_command: "codex app-server",
           codex_approval_policy: %{reject: %{sandbox_approval: true, rules: true, mcp_elicitations: true}},
           codex_thread_sandbox: "workspace-write",
@@ -144,6 +147,9 @@ defmodule SymphonyElixir.TestSupport do
     max_turns = Keyword.get(config, :max_turns)
     max_retry_backoff_ms = Keyword.get(config, :max_retry_backoff_ms)
     max_concurrent_agents_by_state = Keyword.get(config, :max_concurrent_agents_by_state)
+    codex_review_enabled = Keyword.get(config, :codex_review_enabled)
+    codex_review_states = Keyword.get(config, :codex_review_states)
+    codex_review_prompt = Keyword.get(config, :codex_review_prompt)
     codex_command = Keyword.get(config, :codex_command)
     codex_approval_policy = Keyword.get(config, :codex_approval_policy)
     codex_thread_sandbox = Keyword.get(config, :codex_thread_sandbox)
@@ -184,6 +190,7 @@ defmodule SymphonyElixir.TestSupport do
         "  max_turns: #{yaml_value(max_turns)}",
         "  max_retry_backoff_ms: #{yaml_value(max_retry_backoff_ms)}",
         "  max_concurrent_agents_by_state: #{yaml_value(max_concurrent_agents_by_state)}",
+        codex_review_yaml(codex_review_enabled, codex_review_states, codex_review_prompt),
         "codex:",
         "  command: #{yaml_value(codex_command)}",
         "  approval_policy: #{yaml_value(codex_approval_policy)}",
@@ -253,6 +260,30 @@ defmodule SymphonyElixir.TestSupport do
     ]
     |> Enum.reject(&(&1 in [nil, false]))
     |> Enum.join("\n")
+  end
+
+  defp codex_review_yaml(false, [], nil), do: nil
+
+  defp codex_review_yaml(enabled, states, prompt) do
+    [
+      "codex_review:",
+      "  enabled: #{yaml_value(enabled)}",
+      "  states: #{yaml_value(states)}",
+      codex_review_prompt_entry(prompt)
+    ]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.join("\n")
+  end
+
+  defp codex_review_prompt_entry(nil), do: nil
+
+  defp codex_review_prompt_entry(prompt) when is_binary(prompt) do
+    indented =
+      prompt
+      |> String.split("\n")
+      |> Enum.map_join("\n", &("    " <> &1))
+
+    "  prompt: |\n#{indented}"
   end
 
   defp observability_yaml(enabled, refresh_ms, render_interval_ms) do

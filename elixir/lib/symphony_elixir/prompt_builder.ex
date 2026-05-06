@@ -11,7 +11,7 @@ defmodule SymphonyElixir.PromptBuilder do
   def build_prompt(issue, opts \\ []) do
     template =
       Workflow.current()
-      |> prompt_template!()
+      |> prompt_template!(issue)
       |> parse_template!()
 
     template
@@ -25,9 +25,22 @@ defmodule SymphonyElixir.PromptBuilder do
     |> IO.iodata_to_binary()
   end
 
-  defp prompt_template!({:ok, %{prompt_template: prompt}}), do: default_prompt(prompt)
+  @spec uses_state_specific_prompt?(SymphonyElixir.Linear.Issue.t()) :: boolean()
+  def uses_state_specific_prompt?(issue) do
+    issue
+    |> Map.get(:state)
+    |> Config.codex_review_state?()
+  end
 
-  defp prompt_template!({:error, reason}) do
+  defp prompt_template!({:ok, %{prompt_template: prompt}}, issue) do
+    if uses_state_specific_prompt?(issue) do
+      default_codex_review_prompt(Config.codex_review_prompt())
+    else
+      default_prompt(prompt)
+    end
+  end
+
+  defp prompt_template!({:error, reason}, _issue) do
     raise RuntimeError, "workflow_unavailable: #{inspect(reason)}"
   end
 
@@ -60,5 +73,34 @@ defmodule SymphonyElixir.PromptBuilder do
     else
       prompt
     end
+  end
+
+  defp default_codex_review_prompt(prompt) when is_binary(prompt) do
+    prompt
+  end
+
+  defp default_codex_review_prompt(_prompt) do
+    """
+    You are performing a Codex review for a Linear issue.
+
+    Identifier: {{ issue.identifier }}
+    Title: {{ issue.title }}
+    Current status: {{ issue.state }}
+
+    Body:
+    {% if issue.description %}
+    {{ issue.description }}
+    {% else %}
+    No description provided.
+    {% endif %}
+
+    Instructions:
+
+    1. Inspect the raw handoff package, changed files, and local workspace diff before asking for human input.
+    2. Run the verification commands required by the issue and by the repository instructions.
+    3. Fix low-risk review findings directly when the fix is clear and within the issue scope.
+    4. Add a concise Codex Review Brief to Linear with artifact paths, acceptance assessment, verification evidence, risks, and a recommendation.
+    5. Stop for human judgment only when product semantics, credentials, permissions, security, or high-risk data behavior require it.
+    """
   end
 end

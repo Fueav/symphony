@@ -970,7 +970,20 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Config.settings!().worker.max_concurrent_agents_per_host == 2
   end
 
+  test "linear polling candidate states include enabled codex review states" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_active_states: ["In Progress"],
+      codex_review_enabled: true,
+      codex_review_states: ["In Review"]
+    )
+
+    assert Client.candidate_state_names_for_test() == ["In Progress", "In Review"]
+  end
+
   test "schema helpers cover custom type and state limit validation" do
+    assert Schema.normalize_state_names(nil) == []
+    assert Schema.normalize_state_names([" ", "Todo", "todo"]) == ["Todo"]
+
     assert StringOrMap.type() == :map
     assert StringOrMap.embed_as(:json) == :self
     assert StringOrMap.equal?(%{"a" => 1}, %{"a" => 1})

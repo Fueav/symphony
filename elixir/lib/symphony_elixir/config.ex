@@ -61,6 +61,33 @@ defmodule SymphonyElixir.Config do
 
   def max_concurrent_agents_for_state(_state_name), do: settings!().agent.max_concurrent_agents
 
+  @spec runnable_issue_states() :: [String.t()]
+  def runnable_issue_states do
+    config = settings!()
+
+    config.tracker.active_states
+    |> Kernel.++(enabled_codex_review_states(config))
+    |> Schema.normalize_state_names()
+  end
+
+  @spec codex_review_state?(term()) :: boolean()
+  def codex_review_state?(state_name) when is_binary(state_name) do
+    config = settings!()
+    normalized_state = Schema.normalize_issue_state(String.trim(state_name))
+
+    config.codex_review.enabled == true and
+      Enum.any?(config.codex_review.states, fn review_state ->
+        Schema.normalize_issue_state(review_state) == normalized_state
+      end)
+  end
+
+  def codex_review_state?(_state_name), do: false
+
+  @spec codex_review_prompt() :: String.t() | nil
+  def codex_review_prompt do
+    settings!().codex_review.prompt
+  end
+
   @spec codex_turn_sandbox_policy(Path.t() | nil) :: map()
   def codex_turn_sandbox_policy(workspace \\ nil) do
     case Schema.resolve_runtime_turn_sandbox_policy(settings!(), workspace) do
@@ -132,6 +159,9 @@ defmodule SymphonyElixir.Config do
         :ok
     end
   end
+
+  defp enabled_codex_review_states(%{codex_review: %{enabled: true, states: states}}), do: states
+  defp enabled_codex_review_states(_settings), do: []
 
   defp format_config_error(reason) do
     case reason do

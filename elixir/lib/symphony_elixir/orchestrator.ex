@@ -651,7 +651,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp active_state_set do
-    Config.settings!().tracker.active_states
+    Config.runnable_issue_states()
     |> Enum.map(&normalize_issue_state/1)
     |> Enum.filter(&(&1 != ""))
     |> MapSet.new()

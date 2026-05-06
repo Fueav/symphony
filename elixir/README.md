@@ -121,6 +121,11 @@ Notes:
   Symphony validation.
 - `agent.max_turns` caps how many back-to-back Codex turns Symphony will run in a single agent
   invocation when a turn completes normally but the issue is still in an active state. Default: `20`.
+- `codex_review.enabled` lets Symphony treat configured review states as runnable Codex states
+  without adding them to `tracker.active_states`. This is useful when Codex should perform the
+  first-pass review after an implementation handoff and only stop for true human judgment. When
+  enabled, `codex_review.states` are included in Linear polling and worker reconciliation, and
+  `codex_review.prompt` overrides the normal Markdown body for matching issue states.
 - If the Markdown body is blank, Symphony uses a default prompt template that includes the issue
   identifier, title, and body.
 - Use `hooks.after_create` to bootstrap a fresh workspace. For a Git-backed repo, you can run
