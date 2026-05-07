@@ -341,6 +341,26 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
           }
         ]
       },
+      "relations" => %{
+        "nodes" => [
+          %{
+            "type" => "blocks",
+            "relatedIssue" => %{
+              "id" => "issue-4",
+              "identifier" => "MT-4",
+              "state" => %{"name" => "Todo"}
+            }
+          },
+          %{
+            "type" => "relatesTo",
+            "relatedIssue" => %{
+              "id" => "issue-5",
+              "identifier" => "MT-5",
+              "state" => %{"name" => "Todo"}
+            }
+          }
+        ]
+      },
       "createdAt" => "2026-01-01T00:00:00Z",
       "updatedAt" => "2026-01-02T00:00:00Z"
     }
@@ -348,6 +368,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     issue = Client.normalize_issue_for_test(raw_issue, "user-1")
 
     assert issue.blocked_by == [%{id: "issue-2", identifier: "MT-2", state: "In Progress"}]
+    assert issue.blocks == [%{id: "issue-4", identifier: "MT-4", state: "Todo"}]
     assert issue.labels == ["backend"]
     assert issue.priority == 2
     assert issue.state == "Todo"
@@ -556,6 +577,62 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     }
 
     assert Orchestrator.should_dispatch_issue_for_test(issue, state)
+  end
+
+  test "terminal running issue promotes next unblocked todo issue to first execution state" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_active_states: ["In Progress"],
+      tracker_terminal_states: ["Done"]
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    next_issue = %Issue{
+      id: "next-1",
+      identifier: "MT-1005",
+      title: "Next ready work",
+      state: "Todo",
+      blocked_by: [%{id: "done-1", identifier: "MT-1004", state: "Done"}]
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [next_issue])
+
+    state = %Orchestrator.State{
+      max_concurrent_agents: 3,
+      running: %{
+        "done-1" => %{
+          pid: nil,
+          ref: nil,
+          identifier: "MT-1004",
+          issue: %Issue{id: "done-1", identifier: "MT-1004", title: "Completed work", state: "In Progress"},
+          started_at: DateTime.utc_now(),
+          codex_input_tokens: 0,
+          codex_output_tokens: 0,
+          codex_total_tokens: 0,
+          codex_last_reported_input_tokens: 0,
+          codex_last_reported_output_tokens: 0,
+          codex_last_reported_total_tokens: 0
+        }
+      },
+      claimed: MapSet.new(["done-1"]),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    terminal_issue = %Issue{
+      id: "done-1",
+      identifier: "MT-1004",
+      title: "Completed work",
+      state: "Done",
+      blocks: [%{id: "next-1", identifier: "MT-1005", state: "Todo"}]
+    }
+
+    reconciled_state = Orchestrator.reconcile_issue_states_for_test([terminal_issue], state)
+
+    refute Map.has_key?(reconciled_state.running, "done-1")
+    refute MapSet.member?(reconciled_state.claimed, "done-1")
+    assert_receive {:memory_tracker_state_update, "next-1", "In Progress"}
   end
 
   test "dispatch revalidation skips stale todo issue once a non-terminal blocker appears" do

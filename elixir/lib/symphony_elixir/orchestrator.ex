@@ -349,7 +349,9 @@ defmodule SymphonyElixir.Orchestrator do
       terminal_issue_state?(issue.state, terminal_states) ->
         Logger.info("Issue moved to terminal state: #{issue_context(issue)} state=#{issue.state}; stopping active agent")
 
-        terminate_running_issue(state, issue.id, true)
+        state
+        |> terminate_running_issue(issue.id, true)
+        |> promote_next_unblocked_blocked_issue(issue, terminal_states)
 
       !issue_routable_to_worker?(issue) ->
         Logger.info("Issue no longer routed to this worker: #{issue_context(issue)} assignee=#{inspect(issue.assignee_id)}; stopping active agent")
@@ -550,6 +552,76 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp issue_created_at_sort_key(%Issue{}), do: 9_223_372_036_854_775_807
   defp issue_created_at_sort_key(_issue), do: 9_223_372_036_854_775_807
+
+  defp promote_next_unblocked_blocked_issue(%State{} = state, %Issue{blocks: blocked_issues}, terminal_states)
+       when is_list(blocked_issues) do
+    with target_state when is_binary(target_state) <- first_execution_state_name(),
+         issue_ids when issue_ids != [] <- blocked_issue_ids(blocked_issues),
+         {:ok, issues} <- Tracker.fetch_issue_states_by_ids(issue_ids) do
+      issues
+      |> sort_issues_for_dispatch()
+      |> Enum.find(&todo_promotion_candidate?(&1, state, terminal_states))
+      |> promote_issue_to_execution_state(state, target_state)
+    else
+      nil ->
+        state
+
+      [] ->
+        state
+
+      {:error, reason} ->
+        Logger.warning("Unable to promote downstream issue after terminal transition: #{inspect(reason)}")
+        state
+    end
+  end
+
+  defp promote_next_unblocked_blocked_issue(%State{} = state, _issue, _terminal_states), do: state
+
+  defp first_execution_state_name do
+    Config.settings!().tracker.active_states
+    |> Enum.find(fn state_name ->
+      normalized = normalize_issue_state(to_string(state_name))
+      normalized not in ["", "todo"]
+    end)
+  end
+
+  defp blocked_issue_ids(blocked_issues) when is_list(blocked_issues) do
+    blocked_issues
+    |> Enum.flat_map(fn
+      %{id: id} when is_binary(id) -> [id]
+      _ -> []
+    end)
+    |> Enum.uniq()
+  end
+
+  defp todo_promotion_candidate?(
+         %Issue{id: id, state: state_name} = issue,
+         %State{running: running, claimed: claimed},
+         terminal_states
+       )
+       when is_binary(id) and is_binary(state_name) do
+    normalize_issue_state(state_name) == "todo" and
+      issue_routable_to_worker?(issue) and
+      !todo_issue_blocked_by_non_terminal?(issue, terminal_states) and
+      !Map.has_key?(running, id) and
+      !MapSet.member?(claimed, id)
+  end
+
+  defp todo_promotion_candidate?(_issue, _state, _terminal_states), do: false
+
+  defp promote_issue_to_execution_state(nil, %State{} = state, _target_state), do: state
+
+  defp promote_issue_to_execution_state(%Issue{} = issue, %State{} = state, target_state) do
+    case Tracker.update_issue_state(issue.id, target_state) do
+      :ok ->
+        Logger.info("Promoted downstream issue after blocker terminal transition: #{issue_context(issue)} state=#{target_state}")
+        state
+
+      {:error, reason} ->
+        Logger.warning("Unable to promote downstream issue #{issue_context(issue)} to #{target_state}: #{inspect(reason)}")
+        state
+    end
+  end
 
   defp should_dispatch_issue?(
          %Issue{} = issue,

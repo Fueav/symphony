@@ -43,6 +43,18 @@ defmodule SymphonyElixir.Linear.Client do
             }
           }
         }
+        relations(first: $relationFirst) {
+          nodes {
+            type
+            relatedIssue {
+              id
+              identifier
+              state {
+                name
+              }
+            }
+          }
+        }
         createdAt
         updatedAt
       }
@@ -80,6 +92,18 @@ defmodule SymphonyElixir.Linear.Client do
           nodes {
             type
             issue {
+              id
+              identifier
+              state {
+                name
+              }
+            }
+          }
+        }
+        relations(first: $relationFirst) {
+          nodes {
+            type
+            relatedIssue {
               id
               identifier
               state {
@@ -467,6 +491,7 @@ defmodule SymphonyElixir.Linear.Client do
       url: issue["url"],
       assignee_id: assignee_field(assignee, "id"),
       blocked_by: extract_blockers(issue),
+      blocks: extract_blocks(issue),
       labels: extract_labels(issue),
       assigned_to_worker: assigned_to_worker?(assignee, assignee_filter),
       created_at: parse_datetime(issue["createdAt"]),
@@ -579,6 +604,31 @@ defmodule SymphonyElixir.Linear.Client do
   end
 
   defp extract_blockers(_), do: []
+
+  defp extract_blocks(%{"relations" => %{"nodes" => relations}})
+       when is_list(relations) do
+    relations
+    |> Enum.flat_map(fn
+      %{"type" => relation_type, "relatedIssue" => blocked_issue}
+      when is_binary(relation_type) and is_map(blocked_issue) ->
+        if String.downcase(String.trim(relation_type)) == "blocks" do
+          [
+            %{
+              id: blocked_issue["id"],
+              identifier: blocked_issue["identifier"],
+              state: get_in(blocked_issue, ["state", "name"])
+            }
+          ]
+        else
+          []
+        end
+
+      _ ->
+        []
+    end)
+  end
+
+  defp extract_blocks(_), do: []
 
   defp parse_datetime(nil), do: nil
 
